@@ -1,53 +1,147 @@
-def initialize_solution(data, params):
-    """
-    Initialize the solution based on input data and parameters.
-    Replace this with the appropriate initialization logic from the paper.
-    """
-    # Example: initialize with the first data element or a random value
-    return data[0]
+import numpy as np
 
-def update_solution(current_solution, data, params):
-    """
-    Update the solution using the algorithm’s main update rule.
-    You should replace this placeholder with the actual computation.
-    """
-    # Dummy update: you should apply the proper transformation/update logic here.
-    updated_solution = current_solution  # Replace with actual update logic
-    return updated_solution
+class WSPFCM:
+    def __init__(self, n_clusters=3, lambda1=1.0, lambda2=1.0, p=2.0, q=2.0,
+                 max_iter=100, epsilon=1e-5, random_state=None):
+        self.n_clusters = n_clusters
+        self.lambda1 = lambda1
+        self.lambda2 = lambda2
+        self.p = p  # fuzziness degree
+        self.q = q  # possibilistic degree
+        self.max_iter = max_iter
+        self.epsilon = epsilon
+        self.random_state = random_state
 
-def has_converged(old_solution, new_solution, tolerance):
-    """
-    Check whether the algorithm has converged.
-    This should be replaced with the convergence criteria given in the paper.
-    """
-    return abs(new_solution - old_solution) < tolerance
+    def fit(self, X, labels=None):
+        """
+        X: array-like, shape (n_samples, n_features)
+        labels: array-like of length n_samples. For labeled samples, provide the true class (assumed to be in {0,...,n_clusters-1});
+                for unlabeled samples, set label to None.
+        """
+        if self.random_state is not None:
+            np.random.seed(self.random_state)
+        n, d = X.shape
 
-def main_algorithm(data, params, max_iterations=100, tolerance=1e-6):
-    """
-    A template for the main iterative algorithm.
-    """
-    # Step 1: Initialization
-    current_solution = initialize_solution(data, params)
-    
-    for iteration in range(max_iterations):
-        # Step 2: Compute the next iteration's solution
-        next_solution = update_solution(current_solution, data, params)
-        
-        # Step 3: Check convergence
-        if has_converged(current_solution, next_solution, tolerance):
-            print(f"Convergence reached at iteration {iteration}")
-            return next_solution
-        
-        current_solution = next_solution
+        # Construct b (indicator for labeled data) and f (fuzzy label matrix for supervised term)
+        b = np.zeros(n)
+        f = np.zeros((n, self.n_clusters))
+        if labels is not None:
+            for j in range(n):
+                if labels[j] is not None:
+                    b[j] = 1
+                    # Here we assume the provided label is an integer in 0 ... n_clusters-1.
+                    f[j, int(labels[j])] = 1
 
-    print("Max iterations reached without full convergence.")
-    return current_solution
+        # Initialize cluster centers by randomly selecting data points
+        init_indices = np.random.choice(n, self.n_clusters, replace=False)
+        centers = X[init_indices].copy()
+
+        # Initialize membership (m) and typicality (t) matrices.
+        m = np.full((n, self.n_clusters), 1.0 / self.n_clusters)
+        t = np.full((n, self.n_clusters), 1.0)
+
+        # Precompute global statistics: mean of X and sum of squared distances to mean.
+        x_mean = np.mean(X, axis=0)
+        sum_dist_mean = np.sum(np.linalg.norm(X - x_mean, axis=1) ** 2)
+
+        # Initialize cluster weight eta using Eq. (3):
+        eta = np.zeros(self.n_clusters)
+        for i in range(self.n_clusters):
+            d2 = np.linalg.norm(X - centers[i], axis=1) ** 2
+            numerator = np.sum((m[:, i] ** self.p) * d2)
+            denominator = np.sum(m[:, i] ** self.p) + 1e-8
+            eta[i] = numerator / denominator
+
+        prev_obj = np.inf
+
+        for it in range(self.max_iter):
+            # Update sample weights gamma using Eq. (9)
+            # (Note: The exact formula in the paper is a bit involved. Here we assume a form that penalizes large distances.)
+            gamma = np.zeros((n, self.n_clusters))
+            for i in range(self.n_clusters):
+                for j in range(n):
+                    d2_ji = np.linalg.norm(X[j] - centers[i]) ** 2
+                    # Here we use: gamma[j,i] = exp( (global_avg - d2_ji) )
+                    global_avg = sum_dist_mean / n
+                    gamma[j, i] = np.exp(global_avg - d2_ji)
+
+            # Update membership matrix m using Eq. (11)
+            for j in range(n):
+                for i in range(self.n_clusters):
+                    d2_ji = np.linalg.norm(X[j] - centers[i]) ** 2 + 1e-8
+                    denom_sum = 0.0
+                    for k in range(self.n_clusters):
+                        d2_jk = np.linalg.norm(X[j] - centers[k]) ** 2 + 1e-8
+                        # Ratio term considering the sample weight
+                        ratio = ((1 - gamma[j, i]) * d2_ji) / ((1 - gamma[j, k]) * d2_jk)
+                        denom_sum += ratio ** (1.0 / (self.p - 1))
+                    m[j, i] = 1.0 / (denom_sum + 1e-8)
+
+            # Update typicality matrix t using Eq. (12)
+            for j in range(n):
+                for i in range(self.n_clusters):
+                    d2_ji = np.linalg.norm(X[j] - centers[i]) ** 2 + 1e-8
+                    num = self.lambda1 * eta[i] + self.lambda2 * b[j] * d2_ji * f[j, i]
+                    den = self.lambda1 * gamma[j, i] * d2_ji + self.lambda1 * eta[i] + self.lambda2 * b[j] * d2_ji + 1e-8
+                    t[j, i] = num / den
+
+            # Update cluster centers using Eq. (13)
+            # Define z[j,i] = lambda1*((1-gamma[j,i])*m[j,i]^p + gamma[j,i]*t[j,i]^q) + lambda2*b[j]*(t[j,i]-f[j,i])^q
+            z = np.zeros((n, self.n_clusters))
+            for i in range(self.n_clusters):
+                for j in range(n):
+                    term1 = self.lambda1 * ((1 - gamma[j, i]) * (m[j, i] ** self.p) + gamma[j, i] * (t[j, i] ** self.q))
+                    term2 = self.lambda2 * b[j] * ((t[j, i] - f[j, i]) ** self.q)
+                    z[j, i] = term1 + term2
+                # Update center i as the weighted average of samples.
+                numerator = np.sum(z[:, i].reshape(-1, 1) * X, axis=0)
+                denominator = np.sum(z[:, i]) + 1e-8
+                centers[i] = numerator / denominator
+
+            # Update eta for each cluster using Eq. (3) again.
+            for i in range(self.n_clusters):
+                d2 = np.linalg.norm(X - centers[i], axis=1) ** 2
+                numerator = np.sum((m[:, i] ** self.p) * d2)
+                denominator = np.sum(m[:, i] ** self.p) + 1e-8
+                eta[i] = numerator / denominator
+
+            # Compute the objective function value J using Eq. (7)
+            obj = 0.0
+            for i in range(self.n_clusters):
+                for j in range(n):
+                    d2_ji = np.linalg.norm(X[j] - centers[i]) ** 2
+                    term1 = (1 - gamma[j, i]) * (m[j, i] ** self.p) + gamma[j, i] * (t[j, i] ** self.q)
+                    term2 = (1 - t[j, i]) ** self.q
+                    term3 = b[j] * ((t[j, i] - f[j, i]) ** self.q) * d2_ji
+                    obj += self.lambda1 * (term1 * d2_ji) + self.lambda1 * eta[i] * term2 + self.lambda2 * term3
+
+            print(f"Iteration {it}, objective: {obj:.6f}")
+
+            if abs(prev_obj - obj) < self.epsilon:
+                print("Convergence reached at iteration", it)
+                break
+            prev_obj = obj
+
+        # Save the resulting parameters
+        self.centers_ = centers
+        self.membership_ = m
+        self.typicality_ = t
+        self.eta_ = eta
+        self.gamma_ = gamma
+        return self
 
 # Example usage:
 if __name__ == "__main__":
-    # Dummy data and parameters (replace with real values as needed)
-    data = [1, 2, 3, 4, 5]
-    params = {'example_param': 42}
+    # Generate some synthetic data for demonstration
+    from sklearn.datasets import make_blobs
+    X, y_true = make_blobs(n_samples=300, centers=3, cluster_std=0.60, random_state=0)
     
-    result = main_algorithm(data, params)
-    print("Final result:", result)
+    # Assume that only a small fraction of points are labeled (e.g., 10%).
+    labels = [int(label) if np.random.rand() < 0.1 else None for label in y_true]
+    
+    model = WSPFCM(n_clusters=3, lambda1=1.0, lambda2=1.0, p=2.0, q=2.0,
+                   max_iter=50, epsilon=1e-4, random_state=42)
+    model.fit(X, labels)
+    
+    print("Cluster centers:")
+    print(model.centers_)
