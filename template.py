@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib.pyplot as plt
 
 class WSPFCM:
     def __init__(self, n_clusters=3, lambda1=1.0, lambda2=1.0, p=2.0, q=2.0,
@@ -56,12 +57,10 @@ class WSPFCM:
 
         for it in range(self.max_iter):
             # Update sample weights gamma using Eq. (9)
-            # (Note: The exact formula in the paper is a bit involved. Here we assume a form that penalizes large distances.)
             gamma = np.zeros((n, self.n_clusters))
             for i in range(self.n_clusters):
                 for j in range(n):
                     d2_ji = np.linalg.norm(X[j] - centers[i]) ** 2
-                    # Here we use: gamma[j,i] = exp( (global_avg - d2_ji) )
                     global_avg = sum_dist_mean / n
                     gamma[j, i] = np.exp(global_avg - d2_ji)
 
@@ -72,7 +71,6 @@ class WSPFCM:
                     denom_sum = 0.0
                     for k in range(self.n_clusters):
                         d2_jk = np.linalg.norm(X[j] - centers[k]) ** 2 + 1e-8
-                        # Ratio term considering the sample weight
                         ratio = ((1 - gamma[j, i]) * d2_ji) / ((1 - gamma[j, k]) * d2_jk)
                         denom_sum += ratio ** (1.0 / (self.p - 1))
                     m[j, i] = 1.0 / (denom_sum + 1e-8)
@@ -86,14 +84,12 @@ class WSPFCM:
                     t[j, i] = num / den
 
             # Update cluster centers using Eq. (13)
-            # Define z[j,i] = lambda1*((1-gamma[j,i])*m[j,i]^p + gamma[j,i]*t[j,i]^q) + lambda2*b[j]*(t[j,i]-f[j,i])^q
             z = np.zeros((n, self.n_clusters))
             for i in range(self.n_clusters):
                 for j in range(n):
                     term1 = self.lambda1 * ((1 - gamma[j, i]) * (m[j, i] ** self.p) + gamma[j, i] * (t[j, i] ** self.q))
                     term2 = self.lambda2 * b[j] * ((t[j, i] - f[j, i]) ** self.q)
                     z[j, i] = term1 + term2
-                # Update center i as the weighted average of samples.
                 numerator = np.sum(z[:, i].reshape(-1, 1) * X, axis=0)
                 denominator = np.sum(z[:, i]) + 1e-8
                 centers[i] = numerator / denominator
@@ -130,18 +126,27 @@ class WSPFCM:
         self.gamma_ = gamma
         return self
 
-# Example usage:
 if __name__ == "__main__":
-    # Generate some synthetic data for demonstration
+    # Generate synthetic data for demonstration
     from sklearn.datasets import make_blobs
-    X, y_true = make_blobs(n_samples=300, centers=3, cluster_std=0.60, random_state=0)
+    X, y_true = make_blobs(n_samples=300, centers=3, cluster_std=0.60, random_state=10)
     
-    # Assume that only a small fraction of points are labeled (e.g., 10%).
+    # Assume only a small fraction of points are labeled (e.g., 10%).
     labels = [int(label) if np.random.rand() < 0.1 else None for label in y_true]
     
+    # Fit the model
     model = WSPFCM(n_clusters=3, lambda1=1.0, lambda2=1.0, p=2.0, q=2.0,
                    max_iter=50, epsilon=1e-4, random_state=42)
     model.fit(X, labels)
     
-    print("Cluster centers:")
-    print(model.centers_)
+    # Assign each data point to the cluster with the highest membership value.
+    cluster_assignment = np.argmax(model.membership_, axis=1)
+    
+    # Visualization
+    plt.figure(figsize=(8, 6))
+    plt.scatter(X[:, 0], X[:, 1], c=cluster_assignment, cmap='viridis', s=30, alpha=0.7)
+    plt.scatter(model.centers_[:, 0], model.centers_[:, 1], color='red', marker='x', s=150, linewidths=3)
+    plt.title("WSPFCM Clustering")
+    plt.xlabel("Feature 1")
+    plt.ylabel("Feature 2")
+    plt.show()
